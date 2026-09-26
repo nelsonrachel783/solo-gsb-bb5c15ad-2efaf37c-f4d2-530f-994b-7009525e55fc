@@ -635,6 +635,79 @@ class PreloadResponse(BaseModel):
     )
 
 
+class ReplayCandidateItem(BaseModel):
+    """单个回放候选：现有口令 id 与其非负整数优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        description=(
+            "候选口令 id（必须存在于 commands 中，不能为空）；"
+            "各候选之间不可重复"
+        ),
+    )
+    priority: int = Field(..., description="候选优先级，必须为非负整数")
+
+
+class ReplayPlanRequest(BaseModel):
+    """POST /replays/plan 请求体：/compile 同格式口令数组 + 候选列表 / 留白 / 预算。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="现有口令数组，格式与 POST /compile 的请求体一致"
+    )
+    candidates: list[ReplayCandidateItem] = Field(
+        ...,
+        description="回放候选口令列表，至多 12 条；每条携带非负整数 priority，允许为空数组",
+        max_length=12,
+    )
+    lead_in_ms: int = Field(
+        ...,
+        description=(
+            "前留白毫秒数，必须为非负整数；"
+            "候选录制窗口起点为 max(0, 口令起点 - 前留白)"
+        ),
+    )
+    lead_out_ms: int = Field(
+        ...,
+        description="后留白毫秒数，必须为非负整数；候选录制窗口终点为口令结束时刻 + 后留白",
+    )
+    budget_ms: int = Field(
+        ...,
+        description=(
+            "回放时长预算（毫秒），必须为正数；"
+            "跨通道合并后的录制窗口总时长不得超过它"
+        ),
+    )
+
+
+class ReplaySegment(BaseModel):
+    start_ms: int = Field(..., description="合并片段起点（毫秒，半开区间左端）")
+    end_ms: int = Field(..., description="合并片段结束时刻（毫秒，半开区间右端）")
+
+
+class ReplayPlanResponse(BaseModel):
+    selected_ids: list[str] = Field(
+        ...,
+        description=(
+            "入选候选口令 id，按 id 升序；预算内优先级总和最大、"
+            "并列条数最多、再并列入选 id 升序列表字典序最小"
+        ),
+    )
+    segments: list[ReplaySegment] = Field(
+        ...,
+        description=(
+            "入选候选全部录制窗口跨通道合并（重叠或首尾相接）后的片段，"
+            "按起点升序"
+        ),
+    )
+    total_duration_ms: int = Field(
+        ..., description="合并片段总时长（毫秒），即计入预算的录制时长"
+    )
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",
@@ -672,6 +745,10 @@ class ErrorBody(BaseModel):
         "DUPLICATE_COMMAND_LINK",
         "INVALID_READY_MS",
         "TOO_MANY_PRELOAD_ASSETS",
+        "REPLAY_TARGET_NOT_FOUND",
+        "INVALID_REPLAY_PADDING",
+        "INVALID_REPLAY_BUDGET",
+        "TOO_MANY_REPLAY_CANDIDATES",
     ]
     message: str
     details: dict | None = None

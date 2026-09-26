@@ -18,7 +18,11 @@ base / left / right 三份口令版本按 id 和字段做无状态三方合并�
 序列（false 小于 true）字典序最小的安全组合；还可为至多 12 条预载素材安排
 单台串行加载器：素材只能在就绪时刻之后开始、且必须在所关联口令的起点前完成，
 求按时加载条数最多、并列优先级总和最大、再并列入选 id 升序列表字典序最小，
-同一入选集合取最早完工、并列加载 id 顺序字典序最小的加载方案。
+同一入选集合取最早完工、并列加载 id 顺序字典序最小的加载方案；还可从至多
+12 个带非负整数优先级的候选口令中挑选回放录制集合：每个候选生成
+`[max(0, 起点-前留白), 终点+后留白)` 的全局录制窗口，跨通道重叠或首尾相接的
+窗口合并后才计入回放时长预算，求预算内优先级总和最大、并列入选条数最多、
+再并列入选 id 升序列表字典序最小的集合。
 
 - 在线接口文档（Swagger UI）：<http://localhost:8000/docs>
 - 健康检查：`GET /health`
@@ -33,6 +37,7 @@ base / left / right 三份口令版本按 id 和字段做无状态三方合并�
 - 空档填充规划接口：`POST /fillers/plan`
 - 开关分支选择接口：`POST /branches/select`
 - 素材预载接口：`POST /assets/preload`
+- 回放窗口预算规划接口：`POST /replays/plan`
 
 ## 一条命令启动
 
@@ -1471,6 +1476,117 @@ curl -s http://localhost:8000/assets/preload \
 }
 ```
 
+## 接口约定：`POST /replays/plan`
+
+直播复盘时需要从现有口令中挑选若干条录制回放：现有口令先复用 `POST /compile`
+的编排器校验并解析起止时刻，每个候选口令生成一条**全局录制窗口**
+`[max(0, 起点 - lead_in_ms), 终点 + lead_out_ms)`（前留白受时间原点 0 截断）；
+全部入选候选的窗口**跨通道**求并集——半开区间重叠或首尾相接即合并为同一片段，
+合并后的总时长才计入回放时长预算。服务端在预算内挑选优先级总和最大的候选集合。
+
+请求体为一个对象：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `commands` | array | 是 | 现有口令数组，每一项的字段与 `POST /compile` 的请求体完全一致 |
+| `candidates` | array | 是 | 回放候选口令列表，**至多 12 条**，允许为空数组 |
+| `lead_in_ms` | integer | 是 | 前留白毫秒数，必须为非负整数 |
+| `lead_out_ms` | integer | 是 | 后留白毫秒数，必须为非负整数 |
+| `budget_ms` | integer | 是 | 回放时长预算（毫秒），必须为正数 |
+
+`candidates` 每一项字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 候选口令 id；必须存在于 `commands` 中，不能为空，各候选之间不可重复 |
+| `priority` | integer | 是 | 候选优先级，必须为非负整数 |
+
+窗口与裁决规则：
+
+- 每个候选的录制窗口为 `[max(0, start_ms - lead_in_ms), end_ms + lead_out_ms)`，
+  与所在通道无关（全局窗口，跨通道同样参与合并）。
+- 入选集合的全部窗口求并集：半开区间重叠或**首尾相接**（前一条结束时刻等于
+  后一条起点）即合并为同一片段；合并片段总时长 = 各片段长度之和，
+  不得超过 `budget_ms`。
+- 目标依次为：① 入选 `priority` 总和最大；② 并列时入选条数最多；
+  ③ 再并列时入选 id 升序列表字典序最小。
+- 空集合始终可行（总时长 0）；预算装不下任何候选时返回空集合。
+- 请求无状态、不落数据，服务端不会修改 `commands` 与 `candidates`。
+
+响应字段：
+
+- `selected_ids`：入选候选口令 id，按 id 升序。
+- `segments`：入选窗口合并后的片段，按起点升序；每项含 `start_ms`、`end_ms`
+  （半开区间）。
+- `total_duration_ms`：合并片段总时长（毫秒），即计入预算的录制时长。
+
+### 请求示例（跨通道合并后才计预算）
+
+口令 `a`（`main` 通道 `[0, 100)`）与 `b`（`sub` 通道 `[50, 150)`）的窗口
+跨通道重叠，合并后只占 150ms 预算；`c` 的窗口 `[1000, 1100)` 与之分离：
+
+```bash
+curl -s http://localhost:8000/replays/plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0,    "duration_ms": 100},
+      {"id": "b", "channel": "sub",  "anchor": "START", "offset_ms": 50,   "duration_ms": 100},
+      {"id": "c", "channel": "main", "anchor": "START", "offset_ms": 1000, "duration_ms": 100}
+    ],
+    "candidates": [
+      {"id": "a", "priority": 2},
+      {"id": "b", "priority": 2},
+      {"id": "c", "priority": 4}
+    ],
+    "lead_in_ms": 0,
+    "lead_out_ms": 0,
+    "budget_ms": 150
+  }'
+```
+
+`{a, b}` 合并总时长 150、优先级和 4、条数 2；单条 `c` 总时长 100、优先级 4、
+条数 1。优先级和相同，按条数取 `{a, b}`。响应示例（`200`）：
+
+```json
+{
+  "selected_ids": ["a", "b"],
+  "segments": [
+    {"start_ms": 0, "end_ms": 150}
+  ],
+  "total_duration_ms": 150
+}
+```
+
+若把预算收紧到 100，则 `{a, b}` 不再可行，单条 `c`（优先级 4）胜出，
+`selected_ids` 为 `["c"]`、`segments` 为 `[{"start_ms": 1000, "end_ms": 1100}]`；
+再把预算收紧到 50 则任何候选都装不下，返回空集合（`selected_ids` 与
+`segments` 为空、`total_duration_ms` 为 0）。
+
+### 请求示例（候选不存在，422）
+
+```bash
+curl -s http://localhost:8000/replays/plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 100}
+    ],
+    "candidates": [{"id": "ghost", "priority": 1}],
+    "lead_in_ms": 0,
+    "lead_out_ms": 0,
+    "budget_ms": 1000
+  }'
+```
+
+```json
+{
+  "code": "REPLAY_TARGET_NOT_FOUND",
+  "message": "候选口令 id 不存在于现有口令中: ghost",
+  "details": { "ids": ["ghost"] }
+}
+```
+
 ## 错误处理
 
 所有业务错误均返回 HTTP `422`，响应体统一为：
@@ -1522,6 +1638,10 @@ curl -s http://localhost:8000/assets/preload \
 | `DUPLICATE_COMMAND_LINK` | 仅 `POST /assets/preload`：两条素材关联了同一条口令 id，`details.command_ids` 给出重复的口令 id |
 | `INVALID_READY_MS` | 仅 `POST /assets/preload`：素材 `ready_ms` 为负数 |
 | `TOO_MANY_PRELOAD_ASSETS` | 仅直接调用核心逻辑时：素材超过 12 条（HTTP 层由请求结构校验提前返回 `INVALID_REQUEST`） |
+| `REPLAY_TARGET_NOT_FOUND` | 仅 `POST /replays/plan`：候选 `id` 引用了不存在于 `commands` 的口令 id |
+| `INVALID_REPLAY_PADDING` | 仅 `POST /replays/plan`：`lead_in_ms` 或 `lead_out_ms` 为负数 |
+| `INVALID_REPLAY_BUDGET` | 仅 `POST /replays/plan`：`budget_ms` 不是正数 |
+| `TOO_MANY_REPLAY_CANDIDATES` | 仅直接调用核心逻辑时：候选超过 12 条（HTTP 层由请求结构校验提前返回 `INVALID_REQUEST`） |
 
 > `POST /versions/merge` 的字段级分歧不是错误：无论是否合并成功都返回 HTTP `200`，
 > 由响应体的 `status`（`merged` / `diverged`）区分；仅版本内部重复 id
@@ -1670,6 +1790,25 @@ curl -s http://localhost:8000/assets/preload \
   排列，加载器可在未就绪素材前空转等待。
 - 请求无状态、不落数据；服务端不会修改 `commands` 与 `assets`。
 
+`POST /replays/plan` 额外约定：
+
+- `commands` 的全部校验与错误码和 `/compile` 完全一致（含重复 id、缺失锚点、
+  依赖环、负起点等），且编排非法时优先返回编排错误码。
+- `lead_in_ms` / `lead_out_ms` 为负返回 `INVALID_REPLAY_PADDING`；
+  `budget_ms` 非正返回 `INVALID_REPLAY_BUDGET`。
+- 候选 `id` 为空返回 `INVALID_ID`；重复 `id` 返回 `DUPLICATE_ID`；
+  `priority` 为负返回 `INVALID_PRIORITY`；候选 `id` 不存在于 `commands`
+  返回 `REPLAY_TARGET_NOT_FOUND`（`details.ids` 给出未知 id，按 id 升序）。
+- 候选超过 12 条、字段缺失 / 类型错误 / 多余字段等结构问题返回
+  `INVALID_REQUEST`（直接调用核心逻辑时候选超限返回
+  `TOO_MANY_REPLAY_CANDIDATES`）。
+- 候选窗口与通道无关：跨通道重叠或首尾相接同样合并；空集合始终可行，
+  预算装不下任何候选时返回空集合（`selected_ids` 与 `segments` 为空、
+  `total_duration_ms` 为 0）。
+- 候选至多 12 条，服务端按位掩码枚举全部子集（至多 4096 个），逐子集合并
+  窗口并计算合并总时长，第三目标的 id 列表字典序经整数编码参与比较。
+- 请求无状态、不落数据；服务端不会修改 `commands` 与 `candidates`。
+
 ## 本地开发（不使用 Docker）
 
 要求 Python 3.11+：
@@ -1685,7 +1824,7 @@ uvicorn app.main:app --reload --port 8000
 口令三方合并逻辑位于 `app/merge.py`，临时插播规划逻辑位于
 `app/interruptions.py`，空档填充规划逻辑位于 `app/fillers.py`，
 开关分支选择逻辑位于 `app/branches.py`，素材预载规划逻辑位于
-`app/preload.py`，
+`app/preload.py`，回放窗口预算规划逻辑位于 `app/replays.py`，
 均仅使用标准库，可直接运行单元测试：
 
 ```bash
@@ -1707,9 +1846,10 @@ python3 -m unittest discover -s tests
 │   ├── preload.py         # 纯标准库的素材预载规划（单台串行加载器 + 子集 DP 最早完工与字典序裁决）
 │   ├── rebalance.py       # 纯标准库的节目单延误分摊（固定点切窗 + 余量比例分摊）
 │   ├── reconcile.py       # 纯标准库的实播对账（通道内保序一对一匹配 + 最小罚分 DP）
+│   ├── replays.py         # 纯标准库的回放窗口预算规划（全局窗口合并 + 子集枚举三目标裁决）
 │   ├── routing.py         # 纯标准库的通道改派（位掩码分支限界：最少改派 + 字典序裁决）
 │   ├── schemas.py         # Pydantic 请求与响应模型
-│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/fillers/plan、/branches/select、/assets/preload、/health、统一错误处理）
+│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/fillers/plan、/branches/select、/assets/preload、/replays/plan、/health、统一错误处理）
 ├── tests/
 │   ├── test_branches.py       # 开关分支选择核心逻辑单元测试（标准库 unittest）
 │   ├── test_calibrate.py      # 时钟校准核心逻辑单元测试（标准库 unittest）
@@ -1720,6 +1860,7 @@ python3 -m unittest discover -s tests
 │   ├── test_preload.py        # 素材预载规划核心逻辑单元测试（含子集 × 全排列暴力对照 fuzz）
 │   ├── test_rebalance.py      # 延误分摊核心逻辑单元测试（标准库 unittest）
 │   ├── test_reconcile.py      # 实播对账核心逻辑单元测试（标准库 unittest）
+│   ├── test_replays.py        # 回放窗口预算规划核心逻辑单元测试（含暴力枚举对照 fuzz）
 │   └── test_routing.py        # 通道改派核心逻辑单元测试（标准库 unittest）
 ├── requirements.txt
 ├── Dockerfile
