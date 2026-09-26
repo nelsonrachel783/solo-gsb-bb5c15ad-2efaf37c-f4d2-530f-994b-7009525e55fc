@@ -635,6 +635,75 @@ class PreloadResponse(BaseModel):
     )
 
 
+class ReplayCandidateItem(BaseModel):
+    """单条回放候选：现有口令 id 与非负整数优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ..., description="候选口令 id；必须存在于 commands 中，各候选之间不可重复"
+    )
+    priority: int = Field(..., description="候选优先级，必须为非负整数")
+
+
+class ReplayPlanRequest(BaseModel):
+    """POST /replays/plan 请求体：/compile 同格式口令数组 + 候选 / 留白 / 预算。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="现有口令数组，格式与 POST /compile 的请求体一致"
+    )
+    candidates: list[ReplayCandidateItem] = Field(
+        ...,
+        description=(
+            "候选口令列表，至多 12 条；每条给出已存在口令的 id 与非负整数 "
+            "priority，id 不可重复，允许为空数组"
+        ),
+        max_length=12,
+    )
+    pre_pad_ms: int = Field(
+        ..., description="候选窗口相对口令起点的前留白毫秒数，必须为非负整数"
+    )
+    post_pad_ms: int = Field(
+        ..., description="候选窗口相对口令结束时刻的后留白毫秒数，必须为非负整数"
+    )
+    budget_ms: int = Field(
+        ...,
+        description=(
+            "回放时长预算（毫秒），必须为正数；合并后窗口的总时长不得超过它"
+        ),
+    )
+
+
+class ReplaySegment(BaseModel):
+    start_ms: int = Field(
+        ..., description="合并录制片段起点（毫秒，半开区间左端）"
+    )
+    end_ms: int = Field(
+        ..., description="合并录制片段结束时刻（毫秒，半开区间右端）"
+    )
+
+
+class ReplayPlanResponse(BaseModel):
+    selected_ids: list[str] = Field(
+        ...,
+        description=(
+            "入选候选口令 id，按 id 升序；预算内 priority 总和最大、"
+            "并列条数最多、再并列入选 id 升序列表字典序最小"
+        ),
+    )
+    segments: list[ReplaySegment] = Field(
+        ...,
+        description=(
+            "入选窗口跨通道合并（重叠或首尾相接即合并）后的录制片段，按起点升序"
+        ),
+    )
+    total_duration_ms: int = Field(
+        ..., description="合并片段的总时长（毫秒），不超过 budget_ms"
+    )
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",
@@ -672,6 +741,9 @@ class ErrorBody(BaseModel):
         "DUPLICATE_COMMAND_LINK",
         "INVALID_READY_MS",
         "TOO_MANY_PRELOAD_ASSETS",
+        "REPLAY_TARGET_NOT_FOUND",
+        "INVALID_REPLAY_BUDGET",
+        "TOO_MANY_REPLAY_CANDIDATES",
     ]
     message: str
     details: dict | None = None

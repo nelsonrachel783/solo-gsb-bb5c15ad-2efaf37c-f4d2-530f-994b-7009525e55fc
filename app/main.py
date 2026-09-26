@@ -16,6 +16,7 @@ from .merge import merge_versions
 from .preload import plan_preload
 from .rebalance import rebalance_schedule
 from .reconcile import reconcile_runs
+from .replays import plan_replays
 from .routing import assign_routing
 from .schemas import (
     BranchSelectRequest,
@@ -39,13 +40,15 @@ from .schemas import (
     RebalanceResponse,
     ReconcileRequest,
     ReconcileResponse,
+    ReplayPlanRequest,
+    ReplayPlanResponse,
     RoutingAssignRequest,
     RoutingAssignResponse,
 )
 
 app = FastAPI(
     title="直播导播口令编排 API",
-    version="1.10.0",
+    version="1.11.0",
     description=(
         "接收导播口令数组，解析锚点依赖得到每条口令的起止毫秒时间，"
         "并列出同通道半开区间重叠的冲突 id 对；"
@@ -64,7 +67,9 @@ app = FastAPI(
         "求翻转开关数最少、并列取值序列字典序最小的安全组合；"
         "还可在口令起点截止、素材就绪时刻与单台串行加载器约束下规划素材预载，"
         "求按时加载条数最多、并列优先级总和最大、再并列入选 id 升序列表字典序最小，"
-        "同一入选集合取最早完工、并列加载 id 顺序字典序最小的方案。"
+        "同一入选集合取最早完工、并列加载 id 顺序字典序最小的方案；"
+        "亦可在回放时长预算内为至多 12 条候选口令规划跨通道合并的全局录制窗口，"
+        "求优先级总和最大、并列入选条数最多、再并列入选 id 升序列表字典序最小的集合。"
     ),
 )
 
@@ -263,4 +268,22 @@ async def assets_preload(body: PreloadRequest) -> dict:
     return plan_preload(
         [item.model_dump() for item in body.commands],
         [item.model_dump() for item in body.assets],
+    )
+
+
+@app.post(
+    "/replays/plan",
+    response_model=ReplayPlanResponse,
+    tags=["replays"],
+    summary="回放规划：预算内跨通道合并录制窗口，求优先级总和最大的候选集合",
+    responses={422: {"model": ErrorBody, "description": "请求非法、候选非法或编排失败"}},
+)
+async def replay_plan(body: ReplayPlanRequest) -> dict:
+    # 核心逻辑不依赖 Pydantic，直接喂入 dict 以便独立测试与复用
+    return plan_replays(
+        [item.model_dump() for item in body.commands],
+        [item.model_dump() for item in body.candidates],
+        pre_pad_ms=body.pre_pad_ms,
+        post_pad_ms=body.post_pad_ms,
+        budget_ms=body.budget_ms,
     )
